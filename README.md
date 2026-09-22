@@ -90,5 +90,5 @@ rk start <issue> [feat|fix|chore] assign @me, checkout the flow branch, print is
 rk pr <issue>                     push + PR to the flow base (phase -> epic, standalone -> dev)
 rk finish <epic>                  all phases closed -> PR epic/<name> -> dev
 rk merge <issue> [--approved]     merge the PR, close the issue, delete the branch; dev needs --approved
-rk clean                          delete local branches whose PR was merged (auto on rk start)
+rk clean                          delete local branches whose PR was merged + close their issue (auto on rk start)
 ```
