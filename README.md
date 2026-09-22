@@ -4,18 +4,29 @@ Token-lean Claude Code workflow for cod3rocket projects: plan features as GitHub
 
 ## Install
 
+The repo is private and installs over SSH, so it uses your existing GitHub SSH key (no token needed). You need read access to `cod3rocket/agent-skills`; check with `ssh -T git@github.com`.
+
 In any project, add to `.claude/settings.json` (committed, so the whole team gets it):
 
 ```json
 {
   "extraKnownMarketplaces": {
-    "cod3rocket": { "source": { "source": "github", "repo": "cod3rocket/agent-skills" } }
+    "cod3rocket": {
+      "source": { "source": "git", "url": "git@github.com:cod3rocket/agent-skills.git" }
+    }
   },
   "enabledPlugins": { "rocket@cod3rocket": true }
 }
 ```
 
-Or manually: `/plugin marketplace add cod3rocket/agent-skills` then `/plugin install rocket@cod3rocket`.
+Or manually:
+
+```bash
+claude plugin marketplace add git@github.com:cod3rocket/agent-skills.git
+claude plugin install rocket@cod3rocket
+```
+
+Update with `claude plugin marketplace update cod3rocket`. Background auto-update also goes over SSH, so the key must load without a prompt (ssh-agent / macOS keychain).
 
 Requires `gh` (authenticated). The guard hook needs `jq`.
 
