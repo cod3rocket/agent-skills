@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016 # backticks and jq \( \) are literal on purpose
+# rk — GitHub epic/issue helper for the rocket skills. Terse output by design:
+# every line printed here ends up in the model's context.
+#
+# Branch flow: master <- dev <- epic/<name> <- feat/epic-<name>-<phase>
+# Standalone issues: <type>/<n>-<slug> -> dev. Nothing ever targets master.
+set -euo pipefail
+
+R='repos/{owner}/{repo}'
+DEV=${RK_DEV:-dev}
+TMP=''
+trap '[[ -n $TMP ]] && rm -rf "$TMP"' EXIT
+
+die() { echo "rk: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+rk create <spec.md> [name]        epic + branch epic/<name> (from dev) + ordered sub-issues
+rk add <epic> <title> [body]      new sub-issue (body: file path or text)
+rk issue <title> [body]           standalone issue (goes to dev)
+rk status <epic>                  progress + sub-issue list
+rk next <epic>                    first open, unassigned sub-issue
+rk start <issue> [feat|fix|chore] assign @me, checkout the flow branch, print issue
+rk pr <issue>                     push + PR to the flow base (phase -> epic, standalone -> dev)
+rk finish <epic>                  all phases closed -> PR epic/<name> -> dev
+rk merge <issue> [--approved]     merge the PR, close the issue, delete the branch; dev needs --approved
+rk clean                          delete local branches whose PR was merged (auto on rk start)
+EOF
+  exit 1
+}
+
+slug() {
+  printf '%s' "$1" | iconv -f utf-8 -t ascii//TRANSLIT 2>/dev/null | tr -d "'\"^~\`," | tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40 | sed -E 's/-+$//'
+}
+
+label() { gh label create "$1" --color "$2" >/dev/null 2>&1 || true; }
+
+# new_issue <title> <body-file> [label] -> prints issue number
+new_issue() {
+  local args=(--title "$1" --body-file "$2")
+  if [[ -n ${3:-} ]]; then args+=(--label "$3"); fi
+  local url
+  url=$(gh issue create "${args[@]}")
+  echo "${url##*/}"
+}
+
+# link <parent> <child>: attach child as native sub-issue
+link() {
+  local id
+  id=$(gh api "$R/issues/$2" --jq .id)
+  gh api -X POST "$R/issues/$1/sub_issues" -F sub_issue_id="$id" >/dev/null
+}
+
+# body_file <file-or-text>: write body to $TMP/b
+body_file() {
+  TMP=$(mktemp -d)
+  if [[ -f $1 ]]; then cp "$1" "$TMP/b"; else printf '%s\n' "$1" >"$TMP/b"; fi
+}
+
+parent_of() { gh api "$R/issues/$1/parent" --jq .number 2>/dev/null || true; }
+
+is_epic() { [[ $(gh issue view "$1" --json labels --jq '[.labels[].name] | index("epic") != null') == true ]]; }
+
+# epic_branch <epic>: read "Branch: `epic/x`" from the epic body
+epic_branch() {
+  local b
+  b=$(gh issue view "$1" --json body --jq '.body | capture("Branch: `(?<b>epic/[^`]+)`").b // empty' 2>/dev/null || true)
+  [[ -n $b ]] || die "epic #$1 has no 'Branch: \`epic/...\`' line in its body"
+  echo "$b"
+}
+
+# phase <epic> <issue> -> 1-based position among the epic's sub-issues
+phase() {
+  local p
+  p=$(gh api "$R/issues/$1/sub_issues?per_page=100" --jq "[.[].number] | index($2) // empty")
+  [[ -n $p ]] || die "#$2 is not a sub-issue of epic #$1"
+  echo $((p + 1))
+}
+
+# flow <issue> [type] -> "branch base" for the issue's place in the flow
+flow() {
+  local n=$1 type=${2:-feat} e eb p
+  e=$(parent_of "$n")
+  if [[ -n $e ]]; then
+    eb=$(epic_branch "$e")
+    p=$(phase "$e" "$n")
+    echo "feat/epic-${eb#epic/}-$p $eb"
+  elif is_epic "$n"; then
+    eb=$(epic_branch "$n")
+    echo "$eb $DEV"
+  else
+    p=$(gh issue view "$n" --json title -q .title)
+    echo "$type/$n-$(slug "$p") $DEV"
+  fi
+}
+
+# Standalone branches may be feat/fix/chore; find the one that exists.
+standalone_branch() {
+  local n=$1 b
+  b=$(git branch -a --format='%(refname:short)' | sed 's|^origin/||' | grep -E "^(feat|fix|chore)/$n-" | head -1 || true)
+  echo "$b"
+}
+
+# resolve <issue> [type] -> "branch base", preferring an existing standalone branch
+resolve() {
+  local out branch base b
+  out=$(flow "$1" "${2:-feat}")
+  read -r branch base <<<"$out"
+  if [[ $base == "$DEV" && $branch != epic/* ]]; then
+    b=$(standalone_branch "$1")
+    if [[ -n $b ]]; then branch=$b; fi
+  fi
+  echo "$branch $base"
+}
+
+guard_base() {
+  case $1 in master | main) die "refusing to target $1: flow is feat -> epic -> $DEV" ;; esac
+}
+
+cmd_create() {
+  local spec=${1:-} name=${2:-}
+  [[ -f $spec ]] || die "spec not found: $spec"
+  TMP=$(mktemp -d)
+  # "# Title" = epic, "## Task: Title" = sub-issue; everything else is body.
+  awk -v d="$TMP" '
+    /^# / && !e      { e = 1; print substr($0, 3) > (d "/0.t"); f = d "/0.b"; printf "" > f; next }
+    /^## Task: /     { n++; print substr($0, 10) > (d "/" n ".t"); f = d "/" n ".b"; printf "" > f; next }
+    f                { print > f }
+  ' "$spec"
+  [[ -f $TMP/0.t ]] || die "spec needs a '# Epic title' line"
+  [[ -f $TMP/1.t ]] || die "spec needs at least one '## Task: title' line"
+
+  local branch sha
+  branch="epic/$(slug "${name:-$(<"$TMP/0.t")}")"
+  sha=$(gh api "$R/git/ref/heads/$DEV" --jq .object.sha) || die "base branch '$DEV' not found"
+  gh api -X POST "$R/git/refs" -f ref="refs/heads/$branch" -f sha="$sha" >/dev/null ||
+    die "could not create $branch (already exists?)"
+  printf '\nBranch: `%s`\n' "$branch" >>"$TMP/0.b"
+
+  label epic 5319E7
+  local epic i=1 n
+  epic=$(new_issue "$(<"$TMP/0.t")" "$TMP/0.b" epic)
+  echo "epic #$epic $(<"$TMP/0.t") [$branch]"
+  while [[ -f $TMP/$i.t ]]; do
+    n=$(new_issue "$(<"$TMP/$i.t")" "$TMP/$i.b")
+    link "$epic" "$n"
+    echo "  $i. #$n $(<"$TMP/$i.t")"
+    i=$((i + 1))
+  done
+}
+
+cmd_add() {
+  local epic=${1:-} title=${2:-} n
+  [[ -n $epic && -n $title ]] || usage
+  body_file "${3:-}"
+  n=$(new_issue "$title" "$TMP/b")
+  link "$epic" "$n"
+  echo "#$n $title -> epic #$epic"
+}
+
+cmd_issue() {
+  local title=${1:-} n
+  [[ -n $title ]] || usage
+  body_file "${2:-}"
+  n=$(new_issue "$title" "$TMP/b")
+  echo "#$n $title"
+}
+
+cmd_status() {
+  local e=${1:-}
+  [[ -n $e ]] || usage
+  gh api "$R/issues/$e" --jq '"#\(.number) \(.title) — \(.sub_issues_summary.completed)/\(.sub_issues_summary.total) done"'
+  gh api "$R/issues/$e/sub_issues?per_page=100" --jq 'to_entries[] | .key as $i | .value | "  \($i + 1). \(if .state == "closed" then "[x]" else "[ ]" end) #\(.number) \(.title)\(if .assignee then " @" + .assignee.login else "" end)"'
+}
+
+cmd_next() {
+  local e=${1:-} out
+  [[ -n $e ]] || usage
+  out=$(gh api "$R/issues/$e/sub_issues?per_page=100" \
+    --jq '[.[] | select(.state == "open" and .assignee == null)][0] // empty | "#\(.number) \(.title)"')
+  echo "${out:-none: every sub-issue is closed or assigned}"
+}
+
+# Delete local branches whose remote is gone and whose PR was merged.
+cmd_clean() {
+  local cur b n=0
+  git fetch -q --prune origin
+  cur=$(git branch --show-current)
+  while read -r b; do
+    [[ $b == "$cur" ]] && continue
+    if [[ -n $(gh pr list --head "$b" --state merged --json number --jq '.[0].number // empty') ]]; then
+      git branch -q -D "$b" && n=$((n + 1))
+    fi
+  done < <(git for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads | awk '$2 == "[gone]" { print $1 }')
+  if ((n)); then echo "cleaned $n merged branch(es)"; fi
+}
+
+cmd_start() {
+  local n=${1:-} out branch base e p open
+  [[ -n $n ]] || usage
+  if is_epic "$n"; then die "#$n is an epic; work its sub-issues (rk next $n)"; fi
+  cmd_clean
+  out=$(resolve "$n" "${2:-feat}")
+  read -r branch base <<<"$out"
+  guard_base "$base"
+  gh issue edit "$n" --add-assignee @me >/dev/null
+  if ! gh issue develop "$n" --name "$branch" --base "$base" --checkout >/dev/null 2>&1; then
+    # Branch already exists: reuse it.
+    if git show-ref -q --verify "refs/heads/$branch"; then
+      git checkout -q "$branch"
+    else
+      git checkout -q -b "$branch" --track "origin/$branch" 2>/dev/null ||
+        git checkout -q -b "$branch" "origin/$base" || die "could not checkout $branch (dirty tree?)"
+    fi
+  fi
+  echo "branch: $branch -> $base"
+  e=$(parent_of "$n")
+  if [[ -n $e ]]; then
+    p=$(phase "$e" "$n")
+    echo "epic: #$e phase $p"
+    open=$(gh api "$R/issues/$e/sub_issues?per_page=100" \
+      --jq ".[:$((p - 1))] | map(select(.state == \"open\") | \"#\(.number)\") | join(\" \")")
+    if [[ -n $open ]]; then echo "warn: earlier phases still open: $open"; fi
+  fi
+  gh issue view "$n" --json number,title,body,comments --jq '
+    "#\(.number) \(.title)\n\n\(.body)"
+    + (if (.comments | length) > 0
+       then "\n\n--- \(.comments | length) comment(s), latest:\n\(.comments[-1].body)"
+       else "" end)'
+}
+
+cmd_pr() {
+  local n=${1:-} out branch base title body
+  [[ -n $n ]] || usage
+  out=$(resolve "$n")
+  read -r branch base <<<"$out"
+  guard_base "$base"
+  [[ $(git branch --show-current) == "$branch" ]] || die "not on $branch (rk start $n first)"
+  title=$(gh issue view "$n" --json title -q .title)
+  git push -q -u origin HEAD
+  body="Closes #$n"$'\n\n'"$(git log --reverse --format='- %s' "origin/$base..HEAD")"
+  gh pr create --base "$base" --head "$branch" --title "$title" --body "$body"
+}
+
+cmd_finish() {
+  local e=${1:-} branch open list
+  [[ -n $e ]] || usage
+  branch=$(epic_branch "$e")
+  open=$(gh api "$R/issues/$e/sub_issues?per_page=100" --jq 'map(select(.state == "open") | "#\(.number)") | join(" ")')
+  [[ -z $open ]] || die "phases still open: $open"
+  list=$(gh api "$R/issues/$e/sub_issues?per_page=100" --jq '.[] | "- #\(.number) \(.title)"')
+  gh pr create --base "$DEV" --head "$branch" \
+    --title "$(gh issue view "$e" --json title -q .title)" \
+    --body "Closes #$e"$'\n\n'"$list"
+}
+
+cmd_merge() {
+  local n=${1:-} approved=${2:-} out branch base pr how
+  [[ -n $n ]] || usage
+  out=$(resolve "$n")
+  read -r branch base <<<"$out"
+  guard_base "$base"
+  if [[ $base == "$DEV" && $approved != --approved ]]; then
+    die "merging into $DEV needs the user's explicit approval: rk merge $n --approved"
+  fi
+  pr=$(gh pr list --head "$branch" --base "$base" --state open --json number --jq '.[0].number // empty')
+  [[ -n $pr ]] || die "no open PR $branch -> $base (rk pr $n / rk finish $n)"
+  # Phases and standalone issues squash; an epic keeps its phase commits.
+  if [[ $branch == epic/* ]]; then how=--merge; else how=--squash; fi
+  gh pr merge "$pr" "$how" --delete-branch >/dev/null
+  if [[ $(gh issue view "$n" --json state -q .state) == OPEN ]]; then
+    gh issue close "$n" --comment "Merged via #$pr into \`$base\`." >/dev/null
+  fi
+  { git checkout -q "$base" && git pull -q --ff-only; } 2>/dev/null || true
+  echo "merged #$pr $branch -> $base; #$n closed"
+}
+
+cmd=${1:-}
+shift || true
+case $cmd in
+  create | add | issue | status | next | start | pr | finish | merge | clean) "cmd_$cmd" "$@" ;;
+  *) usage ;;
+esac

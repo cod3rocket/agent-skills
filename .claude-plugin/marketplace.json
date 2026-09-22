@@ -1,0 +1,12 @@
+{
+  "name": "cod3rocket",
+  "owner": { "name": "cod3rocket" },
+  "metadata": { "description": "cod3rocket shared agent skills" },
+  "plugins": [
+    {
+      "name": "rocket",
+      "source": "./plugins/rocket",
+      "description": "Token-lean dev workflow: epics + GitHub sub-issues, TDD, debugging, verification."
+    }
+  ]
+}

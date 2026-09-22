@@ -1,0 +1,6 @@
+{
+  "name": "rocket",
+  "version": "0.2.1",
+  "description": "Token-lean dev workflow: epics + GitHub sub-issues, TDD, debugging, verification.",
+  "author": { "name": "cod3rocket" }
+}

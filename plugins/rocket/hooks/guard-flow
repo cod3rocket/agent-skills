@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# PreToolUse guard for the branch flow: master <- dev <- epic/* <- feat/epic-*.
+# Active only in repos that have a dev branch. Silent (zero tokens) unless it blocks.
+# Opt out per session with RK_GUARD=0.
+set -uo pipefail
+
+[[ ${RK_GUARD:-1} == 0 ]] && exit 0
+command -v jq >/dev/null || exit 0
+
+input=$(cat)
+cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
+cwd=$(jq -r '.cwd // empty' <<<"$input")
+[[ $cmd == *git* || $cmd == *gh* ]] || exit 0
+
+DEV=${RK_DEV:-dev}
+git -C "${cwd:-.}" show-ref -q "refs/remotes/origin/$DEV" "refs/heads/$DEV" || exit 0
+
+block() { echo "rocket flow: $* (flow: feat/epic-<name>-<phase> -> epic/<name> -> $DEV -> master; use rk)" >&2; exit 2; }
+
+protected="master|main|$DEV"
+branch=$(git -C "${cwd:-.}" branch --show-current 2>/dev/null)
+
+if grep -Eq '\bgh[[:space:]]+pr[[:space:]]+(create|merge)\b' <<<"$cmd"; then
+  block "raw 'gh pr create/merge' is not allowed; use 'rk pr', 'rk finish' or 'rk merge'"
+fi
+if grep -Eq "\bgh[[:space:]]+pr[[:space:]]+edit\b.*(--base|-B)[[:space:]=]+($protected)\b" <<<"$cmd"; then
+  block "retargeting a PR to a protected branch"
+fi
+if grep -Eq "\bgit\b[^|;&]*\bpush\b[^|;&]*([[:space:]:+])($protected|epic/[^[:space:]]+)([[:space:]]|$)" <<<"$cmd"; then
+  block "direct push to a protected or epic branch"
+fi
+if [[ $branch =~ ^($protected)$ || $branch == epic/* ]]; then
+  if grep -Eq '\bgit\b[^|;&]*\b(commit|merge|cherry-pick|revert|push)\b' <<<"$cmd"; then
+    block "no commits, merges or pushes on '$branch'; work on a feature branch (rk start <issue>)"
+  fi
+fi
+exit 0
