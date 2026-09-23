@@ -9,7 +9,7 @@ One issue per session. State lives in GitHub, so `/clear` between issues costs n
 
 `rk` = `../../scripts/rk` relative to this skill's base directory.
 
-Branch flow (`rk` handles it; never bypass): `master ← dev ← epic/<name> ← feat/epic-<name>-<phase>`. Standalone issues: `feat|fix|chore/<n>-<slug> → dev`. Nothing ever targets master.
+Branch flow (`rk` handles it; never bypass): `master ← dev ← epic/<name> ← feat/epic-<name>-<phase>`. Standalone issues: `feat|fix|chore/<n>-<slug> → dev`. `dev → master` only via `rk release`.
 
 1. **Pick.** Epic or "next" given → `rk next <epic>`. Issue given → use it. Unplanned work with no issue → `rk issue "<title>" "<what + 1–3 criteria>"` (no questions unless the goal is unclear), then use that number. Already coded without an issue → same, then skip to 6.
 2. **Start.** `rk start <n>` (standalone bug/chore: `rk start <n> fix|chore`): assigns you, checks out the flow branch, prints the issue. That output is the spec; don't fetch it again.
@@ -21,6 +21,9 @@ Branch flow (`rk` handles it; never bypass): `master ← dev ← epic/<name> ←
    - Phase of an epic: verify green → `rk merge <n>` (squash into the epic branch, closes the issue). Last phase → `rk finish <epic>` (PR epic → dev).
    - PRs into dev (epic or standalone): stop and ask the user to validate. Only after an explicit OK in chat → `rk merge <n|epic> --approved`.
    Reply with the PR URL/result and one line. Stop; don't start the next issue unless asked.
+
+**Dev moved** (`rk start` warns the epic is behind, or a phase needs something from dev) → `rk sync <epic>`. On conflict it leaves you on the epic branch: resolve, `git add`, `rk sync <epic> --continue` (no PR needed).
+**Release** only when the user asks: `rk release` opens `dev → master`; after explicit approval, `rk release merge --approved`.
 
 Blocked (missing decision, failing unrelated test, unclear criterion) → ask one precise question instead of guessing.
 

@@ -6,11 +6,13 @@
 # can fail ends in '|| exit 1'.
 #
 # Branch flow: master <- dev <- epic/<name> <- feat/epic-<name>-<phase>
-# Standalone issues: <type>/<n>-<slug> -> dev. Nothing ever targets master.
+# Standalone issues: <type>/<n>-<slug> -> dev. dev -> epic via rk sync.
+# Only rk release targets master, and only merges with --approved.
 set -euo pipefail
 
 R='repos/{owner}/{repo}'
 DEV=${RK_DEV:-dev}
+MAIN=${RK_MAIN:-master}
 TMP=''
 trap '[[ -n $TMP ]] && rm -rf "$TMP"' EXIT
 
@@ -33,6 +35,9 @@ rk start <issue> [feat|fix|chore] assign @me, checkout the flow branch, print is
 rk pr <issue>                     push + PR to the flow base (phase -> epic, standalone -> dev)
 rk finish <epic>                  all phases closed -> PR epic/<name> -> dev
 rk merge <issue> [--approved]     merge the PR, close the issue, delete the branch; dev needs --approved
+rk sync <epic> [--continue|--abort]  merge dev into epic/<name> (no PR); conflicts resolved locally
+rk release [title]                PR dev -> master
+rk release merge --approved       merge the release PR (keeps dev)
 rk clean                          delete local branches whose PR was merged + close their issue (auto on rk start)
 EOF
   exit 1
@@ -128,7 +133,7 @@ resolve() {
 }
 
 guard_base() {
-  case $1 in master | main) die "refusing to target $1: flow is feat -> epic -> $DEV" ;; esac
+  case $1 in master | main | "$MAIN") die "refusing to target $1: only 'rk release' goes to $MAIN" ;; esac
 }
 
 cmd_create() {
@@ -220,7 +225,7 @@ cmd_clean() {
 }
 
 cmd_start() {
-  local n=${1:-} kind out branch base e p open
+  local n=${1:-} kind out branch base e p open behind
   [[ -n $n ]] || usage
   kind=$(gh api "$R/issues/$n" --jq 'if .pull_request then "pr" elif ([.labels[].name] | index("epic")) then "epic" else "issue" end') || exit 1
   case $kind in
@@ -246,6 +251,8 @@ cmd_start() {
   if [[ -n $e ]]; then
     p=$(phase "$e" "$n") || exit 1
     echo "epic: #$e phase $p"
+    behind=$(git rev-list --count "origin/${base}..origin/$DEV" 2>/dev/null || echo 0)
+    if ((behind)); then echo "warn: $base is $behind commit(s) behind $DEV (rk sync $e)"; fi
     open=$(gh api "$R/issues/$e/sub_issues?per_page=100" \
       --jq ".[:$((p - 1))] | map(select(.state == \"open\") | \"#\(.number)\") | join(\" \")")
     if [[ -n $open ]]; then echo "warn: earlier phases still open: $open"; fi
@@ -303,9 +310,71 @@ cmd_merge() {
   echo "merged #$pr $branch -> $base; #$n closed"
 }
 
+# Merge dev into the epic branch. Server-side when clean; on conflict, merge
+# locally and leave the conflicts for the agent (--continue / --abort).
+cmd_sync() {
+  local e=${1:-} opt=${2:-} branch code files
+  [[ -n $e ]] || usage
+  branch=$(epic_branch "$e") || exit 1
+  case $opt in
+    --continue)
+      [[ $(git branch --show-current) == "$branch" ]] || die "not on $branch"
+      files=$(git diff --name-only --diff-filter=U)
+      [[ -z $files ]] || die "still unresolved: $(echo "$files" | tr '\n' ' ')(git add them)"
+      quiet git commit --no-edit
+      quiet git push origin "$branch"
+      echo "synced $DEV -> $branch"
+      return ;;
+    --abort)
+      git merge --abort 2>/dev/null || true
+      echo "sync aborted; $branch unchanged"
+      return ;;
+  esac
+  code=$(gh api -i -X POST "$R/merges" -f base="$branch" -f head="$DEV" \
+    -f commit_message="chore: merge $DEV into $branch" 2>/dev/null | awk 'NR == 1 { print $2; exit }') || true
+  case $code in
+    201) echo "synced $DEV -> $branch" ;;
+    204) echo "$branch already has $DEV" ;;
+    409)
+      git fetch -q origin
+      if git show-ref -q --verify "refs/heads/$branch"; then
+        quiet git checkout "$branch"
+        quiet git merge --ff-only "origin/$branch"
+      else
+        quiet git checkout -b "$branch" --track "origin/$branch"
+      fi
+      if git merge -q --no-edit -m "chore: merge $DEV into $branch" "origin/$DEV" >/dev/null 2>&1; then
+        quiet git push origin "$branch"
+        echo "synced $DEV -> $branch"
+      else
+        echo "conflicts merging $DEV into $branch:"
+        git diff --name-only --diff-filter=U | sed 's/^/  /'
+        echo "resolve them, git add, then: rk sync $e --continue (or --abort)"
+      fi ;;
+    *) die "merge API failed (HTTP ${code:-?}) for $DEV -> $branch" ;;
+  esac
+}
+
+cmd_release() {
+  local sub=${1:-} approved=${2:-} pr list
+  pr=$(gh pr list --head "$DEV" --base "$MAIN" --state open --json number --jq '.[0].number // empty')
+  if [[ $sub == merge ]]; then
+    [[ $approved == --approved ]] || die "merging into $MAIN needs the user's explicit approval: rk release merge --approved"
+    [[ -n $pr ]] || die "no open PR $DEV -> $MAIN (rk release)"
+    quiet gh pr merge "$pr" --merge
+    echo "merged #$pr $DEV -> $MAIN"
+    return
+  fi
+  if [[ -n $pr ]]; then gh pr view "$pr" --json url -q .url; return; fi
+  git fetch -q origin
+  list=$(git log --first-parent --format='- %s' "origin/$MAIN..origin/$DEV")
+  [[ -n $list ]] || die "$DEV has nothing new for $MAIN"
+  gh pr create --base "$MAIN" --head "$DEV" --title "${sub:-Release $(date +%F)}" --body "$list"
+}
+
 cmd=${1:-}
 shift || true
 case $cmd in
-  create | add | issue | status | next | start | pr | finish | merge | clean) "cmd_$cmd" "$@" ;;
+  create | add | issue | status | next | start | pr | finish | merge | clean | sync | release) "cmd_$cmd" "$@" ;;
   *) usage ;;
 esac

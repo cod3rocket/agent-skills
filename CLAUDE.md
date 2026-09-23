@@ -20,6 +20,6 @@ Every skill description is loaded in every session; bodies load on use. Optimize
 - Skills reference each other by name (`rocket:tdd`), never inline each other's content.
 - Bump `version` in `plugins/rocket/.claude-plugin/plugin.json` on every release.
 
-Branch flow (enforced by `rk` and the hook, keep both in sync): `master ← dev ← epic/<name> ← feat/epic-<name>-<phase>`; standalone `feat|fix|chore/<n>-<slug> → dev`. Phases merge into the epic after verify; anything into dev only with the user's approval; never master.
+Branch flow (enforced by `rk` and the hook, keep both in sync): `master ← dev ← epic/<name> ← feat/epic-<name>-<phase>`; standalone `feat|fix|chore/<n>-<slug> → dev`. Phases merge into the epic after verify; `rk sync` merges dev into an epic directly; anything into dev or master only with the user's approval; master only via `rk release`.
 
 Check scripts with `shellcheck plugins/rocket/scripts/rk plugins/rocket/hooks/guard-flow`.

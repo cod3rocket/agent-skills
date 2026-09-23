@@ -35,6 +35,7 @@ Requires `gh` (authenticated). The guard hook needs `jq`.
 ```
 master ← dev ← epic/<name> ← feat/epic-<name>-<phase>
                └ standalone: feat|fix|chore/<issue>-<slug> → dev
+dev → epic/<name>: rk sync (keeps a long-running epic up to date)
 ```
 
 | Step | Who merges |
@@ -42,11 +43,18 @@ master ← dev ← epic/<name> ← feat/epic-<name>-<phase>
 | phase `feat/epic-*` → `epic/<name>` | Claude, after `rocket:verify` is green (squash, closes the issue) |
 | `epic/<name>` → `dev` | Claude opens the PR; merges only after you approve in chat |
 | standalone → `dev` | same: PR, then merge only after your approval |
-| anything → `master` | never (refused by `rk`, blocked by the hook) |
+| `dev` → `epic/<name>` | Claude, `rk sync <epic>`: direct merge, no PR; conflicts resolved locally then `--continue` |
+| `dev` → `master` | Claude opens the release PR (`rk release`); merges only after your approval |
+| anything else → `master` | never (refused by `rk`, blocked by the hook) |
 
 Merged branches are always deleted: `rk merge` removes remote + local; `rk clean` (run by `rk start`) removes local leftovers from merges done in the GitHub UI. Also enable *Settings → Automatically delete head branches* on each repo.
 
-The plugin ships a `PreToolUse` hook (`hooks/guard-flow`) active in repos that have a `dev` branch. It blocks raw `gh pr create/merge`, pushes to `master/main/dev/epic/*`, and commits/merges while on those branches. It costs no tokens unless it blocks. Disable per session with `RK_GUARD=0`; use `RK_DEV` if the integration branch isn't `dev`.
+The plugin ships a `PreToolUse` hook (`hooks/guard-flow`) active in repos that have a `dev` branch. It blocks raw `gh pr create/merge` and raw merge API calls, pushes to `master/main/dev/epic/*`, and commits/merges while on those branches. It only looks at command heads, so text in heredocs, commit messages or issue bodies never trips it. It costs no tokens unless it blocks.
+
+- To disable it, start Claude Code with the variable set: `RK_GUARD=0 claude`. Prefixing a single command (`RK_GUARD=0 git ...`) has no effect, because the hook is a separate process.
+- `RK_DEV` / `RK_MAIN` override the `dev` / `master` names.
+
+**CI:** phase PRs target `epic/<name>`, so workflows triggered on `pull_request` must include `epic/**` in their `branches`, or phases run without CI. Keep `dev` and `master` protected so no automation deletes them.
 
 ## Flow
 
@@ -91,4 +99,7 @@ rk pr <issue>                     push + PR to the flow base (phase -> epic, sta
 rk finish <epic>                  all phases closed -> PR epic/<name> -> dev
 rk merge <issue> [--approved]     merge the PR, close the issue, delete the branch; dev needs --approved
 rk clean                          delete local branches whose PR was merged + close their issue (auto on rk start)
+rk sync <epic> [--continue|--abort]  merge dev into epic/<name> (no PR); conflicts resolved locally
+rk release [title]                PR dev -> master
+rk release merge --approved       merge the release PR (keeps dev)
 ```
