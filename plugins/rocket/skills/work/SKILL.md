@@ -5,7 +5,7 @@ description: Implement one GitHub issue end-to-end (branch → build → verify 
 
 # Work
 
-One issue per session. State lives in GitHub, so `/clear` between issues costs nothing.
+One issue per session. State lives in GitHub, so `/clear` between issues costs nothing. Running a whole epic → `rocket:epic-run` instead.
 
 `rk` = `../../scripts/rk` relative to this skill's base directory.
 
@@ -20,6 +20,7 @@ Branch flow (`rk` handles it; never bypass): `master ← dev ← epic/<name> ←
 7. **Ship.** Conventional commit(s), then `rk pr <n>`.
    - Phase of an epic: verify green → `rk merge <n>` (squash into the epic branch, closes the issue). Last phase → `rk finish <epic>` (PR epic → dev).
    - PRs into dev (epic or standalone): stop and ask the user to validate. Only after an explicit OK in chat → `rk merge <n|epic> --approved`.
+   `rk merge` refuses unless every CI check is green and the PR has no conflicts: checks running → `gh pr checks <pr> --watch` (in background), then retry; failing → fix with `rocket:debug`, push, retry; conflicts → follow its hint. Never merge around it.
    Reply with the PR URL/result and one line. Stop; don't start the next issue unless asked.
 
 **Dev moved** (`rk start` warns the epic is behind, or a phase needs something from dev) → `rk sync <epic>`. On conflict it leaves you on the epic branch: resolve, `git add`, `rk sync <epic> --continue` (no PR needed).

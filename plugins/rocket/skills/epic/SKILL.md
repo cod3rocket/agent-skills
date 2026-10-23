@@ -40,4 +40,4 @@ Task rules:
 - Epic body headings use `###`; only `## Task:` starts a sub-issue.
 
 ## 4. Create
-Run `rk create <spec.md> <name>` once, with `<name>` a 1–3 word kebab-case name: it creates `epic/<name>` from dev, and phases become `feat/epic-<name>-<n>`. Reply with its output and the next step: `/rocket:work` on the first issue, ideally in a fresh session (`/clear`).
+Run `rk create <spec.md> <name>` once, with `<name>` a 1–3 word kebab-case name: it creates `epic/<name>` from dev, and phases become `feat/epic-<name>-<n>`. Reply with its output and the next step: `/rocket:epic-run <epic>` (one sub-session per phase), or `/rocket:work` on a single phase.

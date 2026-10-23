@@ -34,7 +34,7 @@ rk next <epic>                    first open, unassigned sub-issue
 rk start <issue> [feat|fix|chore] assign @me, checkout the flow branch, print issue
 rk pr <issue>                     push + PR to the flow base (phase -> epic, standalone -> dev)
 rk finish <epic>                  all phases closed -> PR epic/<name> -> dev
-rk merge <issue> [--approved]     merge the PR, close the issue, delete the branch; dev needs --approved
+rk merge <issue> [--approved]     CI green + no conflicts -> merge, close the issue, delete the branch; dev needs --approved
 rk sync <epic> [--continue|--abort]  merge dev into epic/<name> (no PR); conflicts resolved locally
 rk release [title]                PR dev -> master
 rk release merge --approved       merge the release PR (keeps dev)
@@ -136,6 +136,33 @@ guard_base() {
   case $1 in master | main | "$MAIN") die "refusing to target $1: only 'rk release' goes to $MAIN" ;; esac
 }
 
+# gate <pr> <conflict-hint>: refuse unless the PR has no conflicts and every
+# CI check passed. No checks at all also refuses: tests must run green in CI.
+gate() {
+  local pr=$1 hint=$2 i out m checks fail pend
+  for i in 1 2 3 4 5; do
+    out=$(gh pr view "$pr" --json mergeable,statusCheckRollup --jq '
+      .mergeable, (.statusCheckRollup[] |
+        (if .__typename == "CheckRun" then
+           (if .status != "COMPLETED" then "pending"
+            elif (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED")) then "ok" else "fail" end)
+         else
+           (if .state == "SUCCESS" then "ok" elif (.state | IN("PENDING", "EXPECTED")) then "pending" else "fail" end)
+         end) + "\t" + (.name // .context))') || exit 1
+    m=${out%%$'\n'*}
+    [[ $m == UNKNOWN ]] || break
+    sleep 3
+  done
+  [[ $m != CONFLICTING ]] || die "PR #$pr has conflicts: $hint, then retry"
+  [[ $m == MERGEABLE ]] || die "PR #$pr mergeability is $m; retry in a moment"
+  checks=$(sed 1d <<<"$out")
+  [[ -n $checks ]] || die "PR #$pr has no CI checks; tests must pass in CI before merging"
+  fail=$(awk -F'\t' '$1 == "fail" { printf "%s; ", $2 }' <<<"$checks")
+  [[ -z $fail ]] || die "PR #$pr failing checks: ${fail%; } (gh pr checks $pr)"
+  pend=$(awk -F'\t' '$1 == "pending" { printf "%s; ", $2 }' <<<"$checks")
+  [[ -z $pend ]] || die "PR #$pr checks still running: ${pend%; } (gh pr checks $pr --watch, then retry)"
+}
+
 cmd_create() {
   local spec=${1:-} name=${2:-}
   [[ -f $spec ]] || die "spec not found: $spec"
@@ -188,7 +215,7 @@ cmd_issue() {
 cmd_status() {
   local e=${1:-}
   [[ -n $e ]] || usage
-  printf 'epic #%s: ' "$e"
+  gh issue view "$e" --json title --jq '"epic #'"$e"' \(.title):"' | tr '\n' ' '
   gh api "$R/issues/$e/sub_issues?per_page=100" --jq '
     "\(map(select(.state == "closed")) | length)/\(length) done",
     (to_entries[] | .key as $i | .value
@@ -301,7 +328,13 @@ cmd_merge() {
   pr=$(gh pr list --head "$branch" --base "$base" --state open --json number --jq '.[0].number // empty')
   [[ -n $pr ]] || die "no open PR $branch -> $base (rk pr $n / rk finish $n)"
   # Phases and standalone issues squash; an epic keeps its phase commits.
-  if [[ $branch == epic/* ]]; then how=--merge; else how=--squash; fi
+  if [[ $branch == epic/* ]]; then
+    how=--merge
+    gate "$pr" "rk sync $n, resolve, rk sync $n --continue"
+  else
+    how=--squash
+    gate "$pr" "on $branch run git merge origin/$base, resolve, commit, git push"
+  fi
   quiet gh pr merge "$pr" "$how" --delete-branch
   if [[ $(gh issue view "$n" --json state -q .state) == OPEN ]]; then
     quiet gh issue close "$n" --comment "Merged via #$pr into \`$base\`."
@@ -361,6 +394,7 @@ cmd_release() {
   if [[ $sub == merge ]]; then
     [[ $approved == --approved ]] || die "merging into $MAIN needs the user's explicit approval: rk release merge --approved"
     [[ -n $pr ]] || die "no open PR $DEV -> $MAIN (rk release)"
+    gate "$pr" "merge origin/$MAIN into a branch off $DEV and land it via a PR"
     quiet gh pr merge "$pr" --merge
     echo "merged #$pr $DEV -> $MAIN"
     return
