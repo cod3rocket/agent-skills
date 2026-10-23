@@ -40,12 +40,14 @@ dev → epic/<name>: rk sync (keeps a long-running epic up to date)
 
 | Step | Who merges |
 |---|---|
-| phase `feat/epic-*` → `epic/<name>` | Claude, after `rocket:verify` is green (squash, closes the issue) |
+| phase `feat/epic-*` → `epic/<name>` | Claude, after `rocket:verify` is green, CI checks pass and there are no conflicts (squash, closes the issue) |
 | `epic/<name>` → `dev` | Claude opens the PR; merges only after you approve in chat |
 | standalone → `dev` | same: PR, then merge only after your approval |
 | `dev` → `epic/<name>` | Claude, `rk sync <epic>`: direct merge, no PR; conflicts resolved locally then `--continue` |
 | `dev` → `master` | Claude opens the release PR (`rk release`); merges only after your approval |
 | anything else → `master` | never (refused by `rk`, blocked by the hook) |
+
+Every `rk merge` / `rk release merge` refuses unless all CI checks on the PR are green and it has no conflicts; a PR with no checks is refused too.
 
 Merged branches are always deleted: `rk merge` removes remote + local; `rk clean` (run by `rk start`) removes local leftovers from merges done in the GitHub UI. Also enable *Settings → Automatically delete head branches* on each repo.
 
@@ -65,12 +67,15 @@ The plugin ships a `PreToolUse` hook (`hooks/guard-flow`) active in repos that h
 /clear
 /rocket:work  next of #10 ...                    last phase → PR epic/<name> → dev (you approve)
 
+/rocket:epic-run #10   → session "<epic> #10"; each phase in a sub-session "<phase> #<n>" → finish → PR → dev (you approve)
+
 /rocket:work  "fix date format on invoices"   → standalone issue → fix/<n>-<slug> → PR → dev (you approve)
 ```
 
 | Skill | Use |
 |---|---|
 | `rocket:epic` | Plan a feature into an epic issue with sub-issues |
+| `rocket:epic-run` | Run an epic phase by phase, one sub-session per phase (Claude desktop app) |
 | `rocket:work` | Implement one issue end-to-end (creates it first for unplanned work), open the PR |
 | `rocket:tdd` | Red-green-refactor loop |
 | `rocket:debug` | Root cause before any fix |
@@ -82,7 +87,7 @@ Agents: `rocket:scout` (haiku, read-only search), `rocket:builder` (sonnet, impl
 
 - GitHub issues are the memory: each issue is worked in a fresh context, not a growing session.
 - Deterministic work (creating/linking issues, branches, PR bodies) runs in `rk`, one call, terse output.
-- Short skills, no session-start injection; only 5 short descriptions are always loaded.
+- Short skills, no session-start injection; only 6 short descriptions are always loaded.
 - Delegated work runs on haiku/sonnet, never frontier models.
 - Targeted tests and trimmed output instead of full logs.
 
@@ -97,7 +102,7 @@ rk next <epic>                    first open, unassigned sub-issue
 rk start <issue> [feat|fix|chore] assign @me, checkout the flow branch, print issue
 rk pr <issue>                     push + PR to the flow base (phase -> epic, standalone -> dev)
 rk finish <epic>                  all phases closed -> PR epic/<name> -> dev
-rk merge <issue> [--approved]     merge the PR, close the issue, delete the branch; dev needs --approved
+rk merge <issue> [--approved]     CI green + no conflicts -> merge, close the issue, delete the branch; dev needs --approved
 rk clean                          delete local branches whose PR was merged + close their issue (auto on rk start)
 rk sync <epic> [--continue|--abort]  merge dev into epic/<name> (no PR); conflicts resolved locally
 rk release [title]                PR dev -> master
