@@ -1,6 +1,8 @@
 {
   "name": "rocket",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Token-lean dev workflow: epics + GitHub sub-issues, TDD, debugging, verification.",
-  "author": { "name": "cod3rocket" }
+  "author": { "name": "cod3rocket" },
+  "license": "MIT",
+  "repository": "https://github.com/cod3rocket/agent-skills"
 }
